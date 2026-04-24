@@ -168,7 +168,6 @@ print(results)
 ```
 
 ```{r}
-#Weekly average forecast (Mar 23-27)
 model_final <- Arima(na.omit(weekly$growth), order=c(1,0,0))
 g_forecast <- forecast(model_final, h=1)$mean
 
