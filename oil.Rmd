@@ -1,0 +1,183 @@
+---
+title: "Oil"
+author: "Lance Zou"
+date: "2026-03-03"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+#rm(list = ls())
+```
+
+
+```{r}
+# Packages 
+library(readr)
+library(dplyr)
+library(zoo)
+library(ggplot2)
+library(stringr)
+library(janitor)
+library(lubridate)
+library(tseries)
+library(Hmisc)
+library(forecast)
+library(tidyr)
+library(ggplot2)
+library(PerformanceAnalytics)
+library(sandwich)
+library(lmtest)
+library(tibble)
+library(readxl)
+library(janitor)
+```
+
+```{r}
+# -----------------------------
+# 1) Load data + monthly time index
+# -----------------------------
+oil_raw <- read_csv(
+  "DCOILWTICO.csv",
+  na = c("", "NA", "."),
+  show_col_types = FALSE
+) |>
+  clean_names()
+
+# Clean + prepare daily data
+oil <- oil_raw |>
+  mutate(date = ymd(observation_date)) |>
+  rename(price = dcoilwtico) |>
+  select(date, price) |>
+  arrange(date) |>
+  filter(!is.na(price))
+
+# -----------------------------
+# 2) Define end of week data
+# -----------------------------
+weekly <- oil %>%
+  mutate(week = floor_date(date, "week", week_start = 1)) %>%
+  group_by(week) %>%
+  slice_max(date, n = 1) %>%
+  ungroup() %>%
+  arrange(week)
+
+
+y <- weekly$price
+```
+
+```{r}
+weekly <- weekly |>
+  mutate(
+    growth = 100 * (price - lag(price)) / lag(price)
+  )
+
+adf.test(weekly$price)
+kpss.test(weekly$price)
+
+adf.test(na.omit(weekly$growth))
+kpss.test(na.omit(weekly$growth))
+```
+
+
+```{r}
+P <- weekly$price
+g <- weekly$growth
+Tn <- length(P)
+
+# -----------------------------
+# 2) Choose OOS window (rolling)
+# -----------------------------
+oos_size  <- 260
+start_oos <- Tn - oos_size + 1
+
+# storage: 1-step ahead PRICE forecasts for P_{t+1}
+fc_rw    <- rep(NA_real_, oos_size)
+fc_nc    <- rep(NA_real_, oos_size)
+fc_ar1   <- rep(NA_real_, oos_size)
+fc_arima <- rep(NA_real_, oos_size)
+
+actual <- rep(NA_real_, oos_size)
+
+safe <- function(expr, default = NA_real_) {
+  tryCatch(expr, error = function(e) default)
+}
+
+# -----------------------------
+# 3) Rolling 1-step-ahead forecasts
+# -----------------------------
+for (i in 1:oos_size) {
+
+  t <- start_oos + i - 1         # index of P_t (forecast P_{t+1})
+  if (t >= Tn) break             # need actual P_{t+1}
+
+  # Training up to time t
+  P_train <- P[1:t]
+  g_train <- na.omit(g[2:t])     # growth aligned
+
+  P_t <- P[t]
+  actual[i] <- P[t + 1]
+
+  # (A) RW / No-change on PRICE
+  fc_rw[i] <- P_t
+  fc_nc[i] <- P_t
+
+  # (B) AR(1) on GROWTH -> convert to price
+  g_hat_ar1 <- safe({
+    fit <- Arima(g_train, order = c(1,0,0), include.mean = TRUE)
+    as.numeric(forecast(fit, h = 1)$mean)
+  })
+  fc_ar1[i] <- P_t * (1 + g_hat_ar1/100)
+
+  # (C) ARIMA(1,1,0) on PRICE
+  p_hat_arima <- safe({
+    fit <- Arima(P_train, order = c(1,1,0), include.drift = FALSE)
+    as.numeric(forecast(fit, h = 1)$mean)
+  })
+  fc_arima[i] <- p_hat_arima
+}
+
+# -----------------------------
+# 4) Trim NAs (AFTER loop)
+# -----------------------------
+keep <- !is.na(actual) & !is.na(fc_rw) & !is.na(fc_ar1) & !is.na(fc_arima)
+
+actual   <- actual[keep]
+fc_rw    <- fc_rw[keep]
+fc_nc    <- fc_nc[keep]
+fc_ar1   <- fc_ar1[keep]
+fc_arima <- fc_arima[keep]
+
+# -----------------------------
+# 5) Compare MSFE (on PRICE)
+# -----------------------------
+msfe <- function(a, f) mean((a - f)^2, na.rm = TRUE)
+
+results <- tibble(
+  Model = c("RW (price)", "No-change (price)", "ARIMA(1,1,0)", "AR(1) growth"),
+  MSFE  = c(msfe(actual, fc_rw),
+            msfe(actual, fc_nc),
+            msfe(actual, fc_arima),
+            msfe(actual, fc_ar1))
+) |>
+  arrange(MSFE)
+
+print(results)
+```
+
+```{r}
+#Weekly average forecast (Mar 23-27)
+model_final <- Arima(na.omit(weekly$growth), order=c(1,0,0))
+g_forecast <- forecast(model_final, h=1)$mean
+
+last_price <- tail(weekly$price,1)
+
+price_forecast <- last_price * (1 + g_forecast/100)
+price_forecast
+```
+
+
+
+
